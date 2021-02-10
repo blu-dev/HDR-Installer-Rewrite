@@ -1,10 +1,12 @@
 #include "utils.hpp"
-#include "json.hpp"
 
-using json = nlohmann::json;
+void pauseForText(int seconds) {
+    consoleUpdate(NULL);
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+}
 
 namespace { // CURL helper stuff
-    struct CURL_builder {
+    struct  CURL_builder {
         CURL* request;
         curl_slist* headers;
 
@@ -41,6 +43,52 @@ namespace { // CURL helper stuff
     size_t jsonWriteCallback(char* to_write, size_t size, size_t byte_count, void* user_data) {
         *(std::stringstream*)user_data << to_write;
         return size * byte_count;
+    }
+
+    /*
+    const int NUM_PROGRESS_CHARS = 50;
+    void print_progress(size_t progress, size_t max) {
+        size_t prog_chars;
+        if (max == 0) prog_chars = NUM_PROGRESS_CHARS;
+        else prog_chars = ((float) progress / max) * NUM_PROGRESS_CHARS;
+
+        std::cout << "\n\n\n";
+        std::cout << "Downloading... Please be patient\n\n";
+        if (prog_chars < NUM_PROGRESS_CHARS) std::cout << YELLOW;
+        else std::cout << GREEN;
+
+        std::cout << "[";
+        for (size_t i = 0; i < prog_chars; i++) { // some some godforsaken reason, both this for loop and the one a few lines below cause everything to lock up and stop downloading...
+            std::cout << "=";
+        }
+
+        if (prog_chars < NUM_PROGRESS_CHARS) std::cout << ">";
+        else std::cout << "=";
+
+        for (size_t i = 0; i < NUM_PROGRESS_CHARS - prog_chars; i++) {
+            std::cout << " ";
+        }
+
+        std::cout << "]\t" << progress << "%\n" RESET;
+    }
+    */
+
+    int download_progress(void* ptr, double TotalToDownload, double NowDownloaded, double TotalToUpload, double NowUploaded) {
+        consoleClear();
+        int percent_complete = (int)((NowDownloaded/TotalToDownload)*100.0);
+        std::cout << WHITE "\n\nDownloading... " << percent_complete << "%\n" RESET;
+        //print_progress( percent_complete, 100 ); // percent out of 100
+        std::cout << "\nPress B to cancel\n";
+        consoleUpdate(NULL);
+
+        hidScanInput();
+        u64 kDown = hidKeysDown(CONTROLLER_P1_AUTO);
+        if (kDown & KEY_B) {
+            return 1;
+        }
+
+        // if you don't return 0, the transfer will be aborted
+        return 0; 
     }
 }
 
@@ -166,24 +214,33 @@ namespace gh {
                 break;
             for (auto& x : parsed.items()) {
                 auto value = x.value();
-                if (!value.contains("name") || !value.contains("tag_name"))
+                if (!value.contains("name") || !value.contains("tag_name") || !value.contains("body"))
                     continue;
-                ret.push_back({ value["name"].get<std::string>(), value["tag_name"].get<std::string>() });
+                ret.push_back({ value["name"].get<std::string>(), value["tag_name"].get<std::string>(), value["body"].get<std::string>() });
             }
             END_BREAKABLE
         }
         return ret;
     }
 
-    AssetID getAssetID(OauthToken token, const std::string& repository, const std::string& tag, const std::string& asset_name) {
-        AssetID ret = -1;
-        if (!userHasPermissions(token, repository, GithubPermissions::PULL))
+    
+    AssetInfos getReleaseInfos(OauthToken token, const std::string& repository, const std::string& tag) {
+        AssetInfos ret = {};
+        if (!userHasPermissions(token, repository, GithubPermissions::PULL)) {
+            std::cout << RED "\nUser does not have permissions for that repo\n" RESET;
+            pauseForText(2);
             return ret;
+        }
         CURL_builder curl;
         if (curl) {
             START_BREAKABLE
-            if (token != nullptr)
+            if (token != nullptr) {
                 curl.SetHeaders({ makeAuthHeader(token) });
+            }
+            else {
+                std::cout << RED "\nInvalid token passed!\n" RESET;
+                pauseForText(2);
+            }
             
             std::stringstream buffer;
             buffer << "https://api.github.com/repos/" << repository << "/releases/tags/" << tag;
@@ -196,61 +253,95 @@ namespace gh {
                     .SetOPT(CURLOPT_WRITEFUNCTION, jsonWriteCallback)
                     .SetOPT(CURLOPT_USERAGENT, "HDR-User")
                     .Perform();
-            if (result != CURLE_OK)
+            if (result != CURLE_OK) {
+                std::cout << RED "\nBad curl attempt\n" RESET;
+                pauseForText(2);
                 break;
+            }
             json parsed;
             try { parsed = json::parse(buffer.str()); }
             catch (json::parse_error& e) { break; }
-            if (!parsed.is_object() || !parsed.contains("assets"))
+            if (!parsed.is_object() || !parsed.contains("assets")) {
+                std::cout << RED "\nFailed to parse json properly\n" RESET;
+                pauseForText(2);
                 break;
+            }
             json assets = parsed["assets"];
             for (auto& x : assets.items()) {
                 auto value = x.value();
-                if (value.contains("name") && value["name"].get<std::string>() == asset_name) {
-                    ret = value["id"].get<int>();
-                    break;
-                }
+                ret.push_back({ 
+                    std::filesystem::path(value["url"].get<std::string>()), 
+                    value["content_type"].get<std::string>(),
+                    value["name"].get<std::string>()
+                });
             }
             END_BREAKABLE
         }
+        else {
+            std::cout << RED "\nFailed to build CURL object\n" RESET;
+            pauseForText(2);
+        }
         return ret;
     }
-    
-    DownloadResult getAsset(OauthToken token, const std::string& repository, const std::string& tag, const std::string& asset_name, const std::string& filepath, DownloadCallback cb) {
+
+    DownloadResult downloadRelease(OauthToken token, const std::string& repository, const std::string& tag, const std::string& filepath_root) {
         DownloadResult ret = DownloadResult::CURL_ERROR;
         if (!userHasPermissions(token, repository, GithubPermissions::PULL))
             return ret;
         CURL_builder curl;
         if (curl) {
             START_BREAKABLE
-            AssetID id = getAssetID(token, repository, tag, asset_name);
-            if (id == -1) {
+            AssetInfos assets = getReleaseInfos(token, repository, tag);
+            if (assets.size() < 1) {
                 ret = DownloadResult::DOES_NOT_EXIST;
                 break;
             }
 
             std::vector<std::string> headers;
             if (token != nullptr) headers.push_back(makeAuthHeader(token));
-            headers.push_back("Accept: application/octet-stream"); // In order to get the full file downloaded, we have to specify this
+            headers.push_back("Accept: application/octet-stream");
 
-            std::stringstream buffer;
-            buffer << "https://api.github.com/repos/" << repository << "/releases/assets/" << id;
-            std::string api_url = buffer.str();
-            buffer.str(""); buffer.clear();
+            for (size_t i = 0; i < assets.size(); i++) {
 
-            FILE* file = fopen(filepath.c_str(), "wb"); // using C file IO because that is what CURL requires
+                std::filesystem::path url = assets[i].url;
 
-            if (cb != nullptr)
-                curl.SetOPT(CURLOPT_NOPROGRESS, 0L).SetOPT(CURLOPT_PROGRESSFUNCTION, cb);
-            CURLcode result =
-                curl.SetHeaders(headers)
-                    .SetURL(api_url.c_str())
-                    .SetOPT(CURLOPT_WRITEDATA, file)
-                    .SetOPT(CURLOPT_USERAGENT, "HDR-USer")
-                    .Perform();
-            if (result != CURLE_OK) {
-                ret = DownloadResult::DOWNLOAD_FAILED;
-                break;
+                std::string path = filepath_root + url.filename().string();
+                FILE* file = fopen(path.c_str(), "wb"); // using C file IO because that is what CURL requires
+
+                if (assets.size() > 1)
+                    std::cout << "\nDownloading multiple files... " GREEN "(" << i+1 << "/" << assets.size() << ")\n" RESET;
+
+                CURLcode result =
+                    curl.SetHeaders(headers)
+                        .SetURL(url.c_str())
+                        .SetOPT(CURLOPT_WRITEDATA, file)
+                        .SetOPT(CURLOPT_USERAGENT, "HDR-User")
+                        .SetOPT(CURLOPT_FOLLOWLOCATION, 1L)
+                        .SetOPT(CURLOPT_SSL_VERIFYPEER, 0L)
+                        .SetOPT(CURLOPT_SSL_VERIFYHOST, 0L)
+                        .SetOPT(CURLOPT_NOPROGRESS, 0L)
+                        .SetOPT(CURLOPT_PROGRESSFUNCTION, download_progress)
+                        .Perform();
+                if (result != CURLE_OK) {
+                    fclose(file);
+                    if (std::filesystem::exists(path))
+                        std::filesystem::remove(path);
+                    return DownloadResult::DOWNLOAD_FAILED;
+                }
+                fclose(file);
+                if (std::filesystem::exists(path) && assets[i].content_type == "application/zip") { // if it's a zip, extract to root then delete it
+                    std::cout << GREEN "\nExtracting...\n" RESET;
+                    consoleUpdate(NULL);
+                    //if (!std::filesystem::exists(TMP_EXTRACTED))
+                        //std::filesystem::create_directories(TMP_EXTRACTED);
+                    elz::extractZip(path, SYSTEM_ROOT/*TMP_EXTRACTED*/);
+                    consoleClear();
+                    std::filesystem::remove(path);
+                }
+                else { // otherwise, just rename the file to it's proper name instead of it's asset id
+                    std::filesystem::path new_path = filepath_root + assets[i].filename;
+                    rename(path.c_str(), new_path.c_str());
+                }
             }
             ret = DownloadResult::SUCCESS;
             END_BREAKABLE
@@ -285,3 +376,75 @@ gh::OauthToken loadOauthToken() {
 void destroyOauthToken(gh::OauthToken token) {
     delete token;
 }
+
+void prep() {
+    std::string dirs[3] = {
+        MODS_FOLDER,
+        APP_PATH,
+        SKYLINE_PATH,
+    };
+    for (std::string dir : dirs) {
+        if (!std::filesystem::exists(dir))
+            std::filesystem::create_directories(dir);
+    }
+
+    /*
+    if (!std::filesystem::exists(INSTALLED_MODS)) { // installed mods file doesn't exist
+        installed_json["Installed"] = {};
+        SaveJson(installed_json);
+    }
+    else { // installed mods file exists, parse json data from it
+        installed_json = GetJson();
+    }
+
+    if (!installed_json.is_object() || !installed_json.contains("Installed")) {
+        std::cout << RED "\nInstalled mods json file is malformed!\n" RESET;
+        pauseForText(3);
+    }
+    */
+}
+
+
+/*
+void SaveJson(json j_obj, std::filesystem::path path) {
+    if (std::filesystem::exists(path))
+        std::filesystem::remove(path);
+
+    std::ofstream writer;
+    writer.open(path);
+    if (writer.is_open())
+        writer << j_obj.dump(4);
+    writer.close();
+}
+
+json GetJson(std::filesystem::path path) {
+    json ret = NULL;
+
+    if (!std::filesystem::exists(path)) {
+        std::cout << "Json path does not exist!\n"; pauseForText(3);
+    }
+
+    std::ifstream reader;
+    std::stringstream buffer;
+    reader.open(path);
+    if (reader.is_open())
+        buffer << reader.rdbuf();
+    reader.close();
+
+    try { ret = json::parse(buffer.str()); }
+    catch (json::parse_error& e) { std::cout << "\n\n" << e.what() << "\n"; pauseForText(3); }
+
+    return ret;
+}
+
+
+void UninstallRelease(std::string release_title) {
+    for (std::pair<std::string, bool> pair : installed_json["Installed"][release_title]["Files"].get<std::vector<std::pair<std::string, bool>>>()) {
+        // If the path exists and that path didn't exist before we installed that file, delete it
+        if (std::filesystem::exists(pair.first) && !pair.second) {
+            std::filesystem::remove(pair.first);
+        }
+    }
+    installed_json["Installed"].erase(release_title);
+}
+*/
