@@ -38,7 +38,7 @@ LATESTTAG := $(shell git describe --tags $(shell git rev-list --tags --max-count
 APP_TITLE	:=	HDR Installer
 APP_AUTHOR	:=	PiNE
 ICON 	:= icon.jpg
-APP_VERSION	:=	$(LATESTTAG)
+APP_VERSION	:=	Rewrite-Beta
 
 ifneq ($(strip $(GITREV)),)
 GITTAG := $(shell git describe --tags $(GITREV) 2>/dev/null)
@@ -66,7 +66,7 @@ CFLAGS	:=	-g -Wall -O3 -ffunction-sections \
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -DVERSION_STRING="\"$(APP_VERSION)\""
 
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -std=c++20 -Wno-deprecated-declarations
+CXXFLAGS	:= $(CFLAGS) -fno-rtti -std=c++20 -Wno-deprecated-declarations -w
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-no-as-needed,-Map,$(notdir $*.map)

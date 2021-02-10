@@ -10,7 +10,7 @@ struct GhDownload {
     gh::OauthToken token;
     std::string repository;
     std::string tag;
-    std::string asset;
+    //bool is_downloaded;
 };
 
 enum class NodeType {
@@ -23,7 +23,7 @@ enum class NodeType {
 NodeType checkType(TreeNode* node);
 
 void makeMenu(TreeNode* node, const std::string& title, const std::vector<std::string>& entries);
-void makeDownloadable(TreeNode* node, const std::string& title, const GhDownload& download);
+void makeDownloadable(TreeNode* node, const std::string& title, const std::string& body, const GhDownload& download);
 void makeEmpty(TreeNode* node, const std::string& title, const std::string& message);
 
 void menuSelect(TreeNode* node, size_t selected);
